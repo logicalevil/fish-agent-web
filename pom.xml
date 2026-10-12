@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.4.1</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>com.zheng</groupId>
+    <artifactId>fish-agent-web</artifactId>
+    <version>0.1.0</version>
+    <packaging>jar</packaging>
+
+    <name>fish-agent-web</name>
+    <description>Fish-Agent SDK 的测试 Web 程序：以外部依赖的方式消费 com.zheng:fish-agent</description>
+
+    <properties>
+        <java.version>21</java.version>
+        <fish-agent.version>0.1.0</fish-agent.version>
+    </properties>
+
+    <dependencies>
+        <!--
+            被测对象：Fish-Agent SDK。
+            它没有发布到中央仓库，需要先在 ../Fish-Agent 执行：
+              mvn clean install -DskipTests -Dmaven.javadoc.skip=true
+        -->
+        <dependency>
+            <groupId>com.zheng</groupId>
+            <artifactId>fish-agent</artifactId>
+            <version>${fish-agent.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!--
+                fish-agent 的 @ToolParam 在未显式指定 name 时依赖反射参数名，
+                因此这里必须保留 -parameters，行为与 SDK 自身编译配置一致。
+                spring-boot-starter-parent 已默认开启，此处显式声明以免被误改。
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <parameters>true</parameters>
+                    <compilerArgs>
+                        <arg>-parameters</arg>
+                    </compilerArgs>
+                </configuration>
+            </plugin>
+
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+
+</project>

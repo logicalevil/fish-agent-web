@@ -1,0 +1,41 @@
+server:
+  port: 8084
+
+spring:
+  application:
+    name: fish-agent-web
+  mvc:
+    # 页面里的 fetch 直接拿 text/plain，避免 SSE 事件格式干扰
+    async:
+      request-timeout: 120s
+
+# Fish-Agent SDK 的配置，前缀对齐 AgentProperties
+fish-agent:
+  # Ollama 服务地址，需本地已启动 ollama serve
+  base-url: http://localhost:11434
+  # 模型需支持 tools，例如 qwen2.5:7b / qwen3:8b / llama3.1:8b
+  model: qwen2.5:7b
+  temperature: 0.7
+  # native（原生 Tool Calling）或 react（文本 ReAct），两种都可用，便于对比
+  mode: native
+  # 流式输出：token 会实时推送到页面
+  streaming: true
+  max-iterations: 8
+  max-repeated-tool-calls: 3
+  # 会话记忆滑动窗口（SYSTEM 消息不受限）
+  session-window-size: 20
+
+logging:
+  level:
+    root: INFO
+    com.zheng.fishagent: DEBUG
+
+# 便于本地排查
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always
