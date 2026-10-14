@@ -25,7 +25,18 @@ import java.util.concurrent.locks.ReentrantLock;
  */
 public class AgentSessionManager {
 
-    /** 一个会话的运行时载体：Agent 与其专属锁、记忆。 */
+    /**
+     * 一个会话的运行时载体：Agent 与其专属锁、记忆。
+     * <p>
+     * <b>为什么用 {@link ReentrantLock} 而不是 SDK 的 {@code MemoryLock}</b>：
+     * 两者的临界区语义不同，不可混用。
+     * <ul>
+     *   <li>这里的锁要包住<b>整个 run</b>——包含模型调用，可能持续数十秒；</li>
+     *   <li>同一会话的请求应当<b>排队等待</b>（它们通常来自同一个用户，等前者完成是预期行为），
+     *       而 {@code MemoryLock#execute} 在取不到锁时会抛异常，用在这里会让用户的第二个问题
+     *       直接报错。</li>
+     * </ul>
+     */
     private record Session(Agent agent, ReentrantLock lock, ChatMemory memory) {
     }
 
@@ -42,6 +53,18 @@ public class AgentSessionManager {
      * 取得指定会话的 Agent 并执行一轮对话。
      * <p>
      * 同一会话的调用会被串行化；不同会话互不阻塞。
+     * <p>
+     * <b>为什么锁的粒度是「整个 run」而不是「单次记忆操作」</b>：
+     * 一次 run 内部的「读—改—写」是跨多次记忆访问的——先读取历史构造请求，
+     * 再发起模型调用（可能数十秒），最后才写入新消息。若只锁单次记忆操作
+     * （SDK 的 {@code MemoryLock} 正是这个粒度），会留下这样一段窗口：
+     * <pre>
+     *   线程A: [读] ─── 模型调用(20s) ─── [写]
+     *   线程B:      [读] ─── 模型调用(20s) ─── [写]
+     *              ↑ 两者读到相同历史，B 看不到 A 的写入
+     * </pre>
+     * 结果是消息不会丢（记忆锁保证了这点），但 B 的推理基于过期上下文，可能给出互相矛盾的回答。
+     * 因此这里必须把锁提到 run 级别，让同一会话的推理真正串行。
      */
     public AgentResult chat(String sessionId, String userInput, AgentListener listener) {
         Session session = sessionFor(sessionId);
