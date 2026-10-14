@@ -18,19 +18,21 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * 本地演示用的对话接口。
  * <p>
  * 设计要点：
  * <ul>
- *   <li>对话是<b>同步</b>接口（{@code ChatRequest}/{@code ChatResponse}），流式分片通过
- *       {@link AgentListener} 收集后一并返回。这样避免引入 SSE 的复杂度，
- *       同时仍然展示「流式输出确实发生了」。</li>
+ *   <li><b>两个对话入口并存</b>：{@code POST /api/chat} 同步返回完整结果（便于 curl 调试与查看
+ *       事件时间线），{@code GET /api/chat/stream} 以 SSE 边生成边推送（用于真实演示体验）。</li>
  *   <li>接口层不做任何并发控制——同一会话的串行化由 {@link AgentSessionManager}
  *       的每会话锁负责，{@link AgentFactory} 也保证每个会话独占一个 Agent 实例。</li>
  * </ul>
@@ -39,16 +41,22 @@ import java.util.Map;
 @RequestMapping("/api")
 public class ChatController {
 
+    /** SSE 连接的最长存活时间：一次 run 可能包含多轮模型调用，取值偏宽裕。 */
+    private static final long SSE_TIMEOUT_MS = 300_000L;
+
     private final AgentSessionManager sessionManager;
     private final AgentFactory agentFactory;
     private final SessionStore sessionStore;
+    private final ExecutorService agentExecutor;
 
     public ChatController(AgentSessionManager sessionManager,
                           AgentFactory agentFactory,
-                          SessionStore sessionStore) {
+                          SessionStore sessionStore,
+                          ExecutorService agentExecutor) {
         this.sessionManager = sessionManager;
         this.agentFactory = agentFactory;
         this.sessionStore = sessionStore;
+        this.agentExecutor = agentExecutor;
     }
 
     /**
@@ -95,6 +103,141 @@ public class ChatController {
         body.put("streamChunkCount", listener.chunkCount);
         body.put("events", listener.events);
         return body;
+    }
+
+    /**
+     * SSE 流式对话：边生成边推送，前端用 {@code EventSource} 接收。
+     * <p>
+     * <b>为什么必须放到独立线程</b>：{@code sessionManager.chat} 是阻塞调用（一次 run 可能耗时
+     * 数十秒）。若直接在 Tomcat 的工作线程里执行，会占满线程池，并发几个请求就不可用了。
+     * 因此这里提交到专用线程池，控制器方法立即返回 {@link SseEmitter}。
+     * <p>
+     * <b>事件格式</b>：每个事件都是一个 JSON 对象，形如 {@code {"type":"token","data":"..."}}。
+     * 类型包括 token / toolCall / toolResult / message / finish / error。
+     * 前端按 {@code type} 分发即可。
+     */
+    @GetMapping(value = "/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter stream(@RequestParam String sessionId,
+                             @RequestParam String message) {
+
+        String id = normalizeSession(sessionId);
+        String input = message == null ? "" : message.trim();
+        SseEmitter emitter = new SseEmitter(SSE_TIMEOUT_MS);
+
+        // 客户端断开时把 emitter 标记为已失效，避免继续往里写
+        AtomicBoolean closed = new AtomicBoolean(false);
+        emitter.onCompletion(() -> closed.set(true));
+        emitter.onTimeout(() -> closed.set(true));
+        emitter.onError(e -> closed.set(true));
+
+        agentExecutor.submit(() -> {
+            try {
+                if (input.isEmpty()) {
+                    send(emitter, closed, "error", Map.of("message", "message 不能为空"));
+                    emitter.complete();
+                    return;
+                }
+
+                AgentListener listener = new SseListener(emitter, closed);
+                AgentResult result = sessionManager.chat(id, input, listener);
+
+                send(emitter, closed, "finish", Map.of(
+                        "stopReason", result.stopReason(),
+                        "iterations", result.iterations(),
+                        "totalTokens", result.usage().totalTokens()));
+                emitter.complete();
+            } catch (Exception e) {
+                // 已经结束或客户端断开时，completeWithError 会再抛异常，这里一并吞掉
+                send(emitter, closed, "error", Map.of(
+                        "message", e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()));
+                try {
+                    emitter.complete();
+                } catch (Exception ignored) {
+                    // 客户端已断开，无需处理
+                }
+            }
+        });
+
+        return emitter;
+    }
+
+    /**
+     * 向 SSE 连接写一个事件。客户端已断开时静默忽略。
+     * <p>
+     * <b>关键</b>：{@code emitter.send} 在客户端断开时会抛 IOException。SDK 的回调
+     * <b>不做异常隔离</b>（见 {@code CompositeAgentListener} 的说明），一旦让异常逃逸出去，
+     * 整个 Agent 运行会被中断。所以这里必须吞掉 IO 异常。
+     */
+    private static void send(SseEmitter emitter, AtomicBoolean closed, String type, Map<String, Object> payload) {
+        if (closed.get()) {
+            return;
+        }
+        try {
+            Map<String, Object> event = new LinkedHashMap<>();
+            event.put("type", type);
+            event.putAll(payload);
+            emitter.send(SseEmitter.event().data(event, MediaType.APPLICATION_JSON));
+        } catch (Exception e) {
+            closed.set(true);
+        }
+    }
+
+    /**
+     * 把 Agent 事件桥接到 SSE。所有回调都运行在同一个线程（SDK 不创建线程），因此无需同步。
+     */
+    private static final class SseListener implements AgentListener {
+
+        private final SseEmitter emitter;
+        private final AtomicBoolean closed;
+
+        private SseListener(SseEmitter emitter, AtomicBoolean closed) {
+            this.emitter = emitter;
+            this.closed = closed;
+        }
+
+        @Override
+        public void onStart(String userInput) {
+            send(emitter, closed, "start", Map.of("userInput", userInput));
+        }
+
+        @Override
+        public void onThought(String thought) {
+            send(emitter, closed, "thought", Map.of("thought", thought));
+        }
+
+        @Override
+        public void onToken(String token) {
+            send(emitter, closed, "token", Map.of("data", token));
+        }
+
+        @Override
+        public void onMessage(Message message) {
+            send(emitter, closed, "message", Map.of(
+                    "role", message.role().value(),
+                    "hasToolCalls", message.hasToolCalls(),
+                    "content", message.content()));
+        }
+
+        @Override
+        public void onToolCall(ToolCall call) {
+            send(emitter, closed, "toolCall", Map.of(
+                    "name", call.name(),
+                    "arguments", call.arguments()));
+        }
+
+        @Override
+        public void onToolResult(ToolCall call, String result) {
+            send(emitter, closed, "toolResult", Map.of(
+                    "name", call.name(),
+                    "result", result == null ? "" : result));
+        }
+
+        @Override
+        public void onError(Throwable error) {
+            send(emitter, closed, "error", Map.of(
+                    "message", String.valueOf(error.getMessage()),
+                    "type", error.getClass().getSimpleName()));
+        }
     }
 
     /**

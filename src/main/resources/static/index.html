@@ -30,7 +30,7 @@
         }
 
         aside {
-            width: 320px;
+            width: 360px;
             border-right: 1px solid var(--border);
             padding: 18px;
             overflow-y: auto;
@@ -150,6 +150,35 @@
         .ev:last-child { border-bottom: none; }
         .ev .evt { color: var(--accent); font-weight: 600; margin-right: 6px; }
 
+        /* 流式过程中的工具调用记录 */
+        .steps {
+            margin-top: 10px;
+            border-top: 1px dashed var(--border);
+            padding-top: 8px;
+            font-size: 12.5px;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .step {
+            color: var(--muted);
+            font-family: ui-monospace, Consolas, monospace;
+            word-break: break-all;
+        }
+        .step.call { color: var(--amber); }
+        .step.result { color: #7f8ea3; }
+        .step.error { color: var(--red); }
+
+        /* 正在接收 token 时的光标提示 */
+        .streaming .body::after {
+            content: '▍';
+            color: var(--accent);
+            animation: blink 1s step-end infinite;
+        }
+        @keyframes blink {
+            50% { opacity: 0; }
+        }
+
         #composer {
             border-top: 1px solid var(--border);
             padding: 14px 24px 18px;
@@ -177,7 +206,7 @@
         <option>由 application.yml 决定</option>
     </select>
 
-    <h2>预置问题</h2>
+    <h2>基础工具</h2>
     <div class="chips" id="samples">
         <span class="chip">现在几点了？</span>
         <span class="chip">帮我算一下 (128+72)*3/5</span>
@@ -185,6 +214,28 @@
         <span class="chip">把 "hello world" 反过来</span>
         <span class="chip">10 除以 0 等于多少</span>
         <span class="chip">我刚才问了什么？</span>
+    </div>
+
+    <h2>多轮协作</h2>
+    <div class="chips" id="samples2">
+        <span class="chip">北京和东京现在的温差是多少度？</span>
+        <span class="chip">比较一下北京、伦敦、纽约三地的当前时间差</span>
+        <span class="chip">查三个城市的平均温度，再乘以 1.8 加 32</span>
+    </div>
+
+    <h2>复杂参数</h2>
+    <div class="chips" id="samples3">
+        <span class="chip">帮我找价格在 100 到 500 之间的数码产品</span>
+        <span class="chip">把所有商品按销量从高到低排一下</span>
+        <span class="chip">有哪些商品分类？</span>
+        <span class="chip">生成一段 300 字的示例文本</span>
+    </div>
+
+    <h2>状态保持</h2>
+    <div class="chips" id="samples4">
+        <span class="chip">帮我记一条待办：下午三点开会</span>
+        <span class="chip">我现在有哪些待办？</span>
+        <span class="chip">再记一条：买牛奶，然后告诉我总共有几条</span>
     </div>
 
     <h2>会话操作</h2>
@@ -269,7 +320,10 @@
         log.scrollTop = log.scrollHeight;
     }
 
-    async function send() {
+    /**
+     * 走 SSE 流式接口：内容边生成边渲染，工具调用实时以分隔块展示。
+     */
+    function send() {
         const sessionId = $('sessionId').value.trim() || 'default';
         const message = $('input').value.trim();
         if (!message) return;
@@ -278,43 +332,112 @@
         $('send').disabled = true;
         bubble('user', '你', message);
 
-        const pending = bubble('', 'Agent', '思考中…');
+        const pending = bubble('', 'Agent', '');
+        pending.classList.add('streaming');
+        const head = pending.parentElement.querySelector('.who');
         const started = performance.now();
 
-        try {
-            const res = await fetch('/api/chat', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({sessionId, message})
-            });
-            const data = await res.json();
-            const elapsed = Math.round(performance.now() - started);
+        let text = '';
+        let tokenCount = 0;
+        let streamBadge = null;     // 复用一个徽章显示分片进度，避免每片都新增一个
+        const toolBlocks = [];      // 记录工具调用，用于结束时机上统计
 
-            if (data.error) {
-                pending.textContent = '调用失败：' + data.error;
-                pending.parentElement.querySelector('.who').appendChild(badge('错误', 'err'));
+        const url = `/api/chat/stream?sessionId=${encodeURIComponent(sessionId)}&message=${encodeURIComponent(message)}`;
+        const source = new EventSource(url);
+
+        const close = () => {
+            source.close();
+            pending.classList.remove('streaming');
+            $('send').disabled = false;
+            $('input').focus();
+        };
+
+        source.onmessage = ev => {
+            let e;
+            try {
+                e = JSON.parse(ev.data);
+            } catch (err) {
                 return;
             }
 
-            pending.textContent = data.answer || '(空回答)';
+            switch (e.type) {
+                case 'token':
+                    // 收到第一个 token 时清掉占位，并建一个徽章实时显示进度
+                    if (tokenCount === 0) {
+                        pending.textContent = '';
+                        streamBadge = badge('流式接收中…', 'ok');
+                        head.appendChild(streamBadge);
+                    }
+                    tokenCount++;
+                    text += e.data;
+                    pending.textContent = text;
+                    streamBadge.textContent = `流式 ${tokenCount} 片`;
+                    log.scrollTop = log.scrollHeight;
+                    break;
 
-            const head = pending.parentElement.querySelector('.who');
-            head.appendChild(badge(data.stopReason, data.stopReason === 'stop' ? 'ok' : ''));
-            head.appendChild(badge(`${data.iterations} 轮`));
-            head.appendChild(badge(`${elapsed}ms`));
-            head.appendChild(badge(`${data.tokenUsage.totalTokens} tokens`));
-            if (data.streamChunkCount > 0) {
-                head.appendChild(badge(`流式 ${data.streamChunkCount} 片`, 'ok'));
+                case 'message':
+                    // 含工具调用的助手消息：以分隔块形式插入，不污染最终答案
+                    if (e.hasToolCalls) {
+                        appendToolBlock(pending, `准备调用工具（${(e.content || '').slice(0, 60)}）`);
+                    }
+                    break;
+
+                case 'toolCall':
+                    toolBlocks.push(e.name);
+                    appendToolBlock(pending, `🔧 ${e.name}(${JSON.stringify(e.arguments)})`, 'call');
+                    // 工具执行后模型会开始新一轮输出，正文游标重置
+                    text = '';
+                    break;
+
+                case 'toolResult':
+                    appendToolBlock(pending, `↳ ${abbreviate(e.result, 160)}`, 'result');
+                    // 下一轮模型输出会继续追加 token，这里把正文游标重置
+                    text = '';
+                    break;
+
+                case 'error':
+                    appendToolBlock(pending, `错误：${e.message}`, 'error');
+                    break;
+
+                case 'finish': {
+                    const elapsed = Math.round(performance.now() - started);
+                    head.appendChild(badge(e.stopReason, e.stopReason === 'stop' ? 'ok' : ''));
+                    head.appendChild(badge(`${e.iterations} 轮`));
+                    head.appendChild(badge(`${elapsed}ms`));
+                    head.appendChild(badge(`${e.totalTokens} tokens`));
+                    if (toolBlocks.length) head.appendChild(badge(`${toolBlocks.length} 次工具调用`, 'tool'));
+                    if (!text.trim()) pending.textContent = '(无文本输出)';
+                    close();
+                    break;
+                }
             }
-            if (data.events && data.events.length) {
-                eventList(data.events);
-            }
-        } catch (e) {
-            pending.textContent = '请求异常：' + e.message;
-        } finally {
-            $('send').disabled = false;
-            $('input').focus();
+        };
+
+        source.onerror = () => {
+            // SSE 断开：可能是正常结束后的关闭，也可能是真的失败
+            if (!text.trim()) pending.textContent = '连接中断，请重试';
+            close();
+        };
+    }
+
+    /** 在回答气泡下方追加一条过程记录（工具调用、工具结果等）。 */
+    function appendToolBlock(bubbleEl, content, kind) {
+        let list = bubbleEl.querySelector('.steps');
+        if (!list) {
+            list = document.createElement('div');
+            list.className = 'steps';
+            bubbleEl.appendChild(list);
         }
+        const line = document.createElement('div');
+        line.className = 'step ' + (kind || '');
+        line.textContent = content;
+        list.appendChild(line);
+        log.scrollTop = log.scrollHeight;
+    }
+
+    function abbreviate(text, max) {
+        if (!text) return '';
+        return text.length <= max ? text : text.slice(0, max) + '…';
     }
 
     function badge(text, kind) {
@@ -399,12 +522,15 @@
         }
     });
 
-    $('samples').addEventListener('click', e => {
-        if (e.target.classList.contains('chip')) {
-            $('input').value = e.target.textContent;
-            $('input').focus();
-        }
-    });
+    // 所有预置问题区域共用同一套点击行为
+    for (const box of ['samples', 'samples2', 'samples3', 'samples4']) {
+        $(box).addEventListener('click', e => {
+            if (e.target.classList.contains('chip')) {
+                $('input').value = e.target.textContent;
+                $('input').focus();
+            }
+        });
+    }
 
     loadTools();
     loadStatus();

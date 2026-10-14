@@ -7,12 +7,19 @@ import com.zheng.fishagent.web.agent.AgentProperties;
 import com.zheng.fishagent.web.agent.AgentSessionManager;
 import com.zheng.fishagent.web.agent.InMemorySessionStore;
 import com.zheng.fishagent.web.agent.SessionStore;
+import com.zheng.fishagent.web.tool.AdvancedTools;
+import com.zheng.fishagent.web.tool.CityTools;
 import com.zheng.fishagent.web.tool.DemoTools;
+import com.zheng.fishagent.web.tool.TodoTools;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 import java.util.List;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 把 SDK 的各个部件装配成 Spring Bean。
@@ -26,15 +33,38 @@ import java.util.List;
 public class AgentConfiguration {
 
     /**
-     * 注解式工具集：由 SDK 扫描 {@code @AgentTool} 方法生成。
-     * <p>
-     * 注意它<b>不是</b> {@code Tool} 的集合——注解容器需要经
-     * {@link com.zheng.fishagent.tool.ToolRegistry#register(Object)} 扫描后
-     * 才变成一个个 {@code Tool}，因此这里单独作为 Bean 暴露。
+     * 基础工具集：简单参数、Map 返回、异常回填等典型场景。
      */
     @Bean
     public DemoTools demoTools() {
         return new DemoTools();
+    }
+
+    /**
+     * 复杂参数工具集：枚举、数组、嵌套 record、长返回值、无参工具。
+     * <p>
+     * 单独成类是因为 {@link DemoTools} 有明确的教学定位（覆盖典型返回类型），
+     * 本类验证的是另一批目标——Schema 递归生成与类型转换的容错。
+     */
+    @Bean
+    public AdvancedTools advancedTools() {
+        return new AdvancedTools();
+    }
+
+    /**
+     * 城市信息工具集：聚合型查询，用于构造多轮工具协作的场景。
+     */
+    @Bean
+    public CityTools cityTools() {
+        return new CityTools();
+    }
+
+    /**
+     * 有副作用的工具集：验证跨调用状态保持与重复调用检测。
+     */
+    @Bean
+    public TodoTools todoTools() {
+        return new TodoTools();
     }
 
     /**
@@ -63,11 +93,47 @@ public class AgentConfiguration {
                         .build());
     }
 
+    /**
+     * 执行 Agent 的专用线程池，供 SSE 接口使用。
+     * <p>
+     * <b>为什么需要它</b>：一次 run 是阻塞调用且可能耗时数十秒，若直接在 Tomcat 工作线程里执行，
+     * 并发几个请求就会耗尽线程池。把 Agent 执行隔离到独立线程池，既能避免阻塞 Web 层，
+     * 也能为这类长任务单独设定队列与拒绝策略。
+     * <p>
+     * 队列容量有限且拒绝策略为 AbortPolicy：宁可快速失败并告知调用方，也不要无限堆积请求——
+     * 后者会让延迟不断累积，最终所有请求一起超时。
+     */
+    @Bean(destroyMethod = "shutdown")
+    public ExecutorService agentExecutor() {
+        return new ThreadPoolExecutor(
+                // 核心线程数：与常见并发会话数匹配
+                4, 16,
+                60L, TimeUnit.SECONDS,
+                new ArrayBlockingQueue<>(32),
+                r -> {
+                    Thread thread = new Thread(r);
+                    thread.setName("fish-agent-" + thread.threadId());
+                    thread.setDaemon(true);
+                    return thread;
+                },
+                new ThreadPoolExecutor.AbortPolicy());
+    }
+
+    /**
+     * 把全部注解式工具容器汇总后交给工厂，由 SDK 统一扫描。
+     * <p>
+     * 之所以传数组而非在工厂里逐个列举，是为了新增工具时只需加一个 Bean，
+     * 不必再改工厂的构造签名。
+     */
     @Bean
     public AgentFactory agentFactory(AgentProperties properties,
+                                     List<Tool> fishAgentFunctionTools,
                                      DemoTools demoTools,
-                                     List<Tool> fishAgentFunctionTools) {
-        return new AgentFactory(properties, demoTools, fishAgentFunctionTools);
+                                     AdvancedTools advancedTools,
+                                     CityTools cityTools,
+                                     TodoTools todoTools) {
+        return new AgentFactory(properties, fishAgentFunctionTools,
+                demoTools, advancedTools, cityTools, todoTools);
     }
 
     /**

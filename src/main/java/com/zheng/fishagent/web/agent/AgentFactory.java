@@ -23,17 +23,23 @@ public class AgentFactory {
     private final ToolRegistry toolRegistry;
 
     /**
-     * @param properties  行为配置
-     * @param annotated   注解式工具容器；SDK 会扫描其 {@code @AgentTool} 方法。
-     *                    可以为 {@code null}
+     * @param properties    行为配置
      * @param functionTools Lambda 式工具；可以为 {@code null}
+     * @param annotated    若干注解式工具容器；SDK 会扫描各自的 {@code @AgentTool} 方法，
+     *                      可以为空。用可变参数是为了新增工具时不必修改本构造签名
      */
-    public AgentFactory(AgentProperties properties, Object annotated, List<Tool> functionTools) {
+    public AgentFactory(AgentProperties properties,
+                        List<Tool> functionTools,
+                        Object... annotated) {
         this.properties = Objects.requireNonNull(properties, "properties 不能为空");
         ToolRegistry registry = new ToolRegistry();
         // 注解容器走 register(Object)，由 SDK 反射扫描并生成 Schema
         if (annotated != null) {
-            registry.register(annotated);
+            for (Object container : annotated) {
+                if (container != null) {
+                    registry.register(container);
+                }
+            }
         }
         if (functionTools != null) {
             functionTools.forEach(registry::register);
