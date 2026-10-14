@@ -23,8 +23,17 @@ fish-agent:
   streaming: true
   max-iterations: 8
   max-repeated-tool-calls: 3
-  # 会话记忆滑动窗口（SYSTEM 消息不受限）
+  # 关闭摘要时参与上下文的最近消息条数；开启摘要后由 summarize-keep 决定
   session-window-size: 20
+  # 会话落盘目录：每个会话一个 JSONL 文件，重启不丢历史
+  session-directory: .fishagent/sessions
+  # 上下文摘要压缩：超过阈值时把早期消息压成一条摘要，避免信息硬丢失
+  # 注意：压缩是同步的，每跨过一次阈值那次请求会多一次模型调用（数秒）
+  summarize-enabled: true
+  # 未摘要消息数超过该值时触发压缩（建议 15-30，太小会频繁调用模型）
+  summarize-trigger: 20
+  # 压缩后保留的最近消息条数（必须明显小于 trigger，否则会刚压缩完又触发）
+  summarize-keep: 5
 
 logging:
   level:

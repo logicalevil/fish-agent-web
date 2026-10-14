@@ -240,6 +240,7 @@
 
     <h2>会话操作</h2>
     <button class="ghost" id="btnHistory">查看记忆消息</button>
+    <button class="ghost" id="btnSummary">查看摘要状态</button>
     <button class="ghost" id="btnReset">重置记忆</button>
     <button class="ghost" id="btnDestroy">销毁会话</button>
 
@@ -492,6 +493,31 @@
         bubble('', `会话 ${sessionId} 的记忆（${messages.length} 条）`, text);
     }
 
+    /** 展示摘要压缩状态，用于确认「压缩是否生效」。 */
+    async function showSummary() {
+        const sessionId = $('sessionId').value.trim() || 'default';
+        const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/summary`);
+        const s = await res.json();
+
+        if (!s.summarizing) {
+            bubble('', '摘要状态', `会话 ${sessionId} 未启用摘要压缩`);
+            return;
+        }
+
+        const lines = [
+            `原文条数（完整历史）：${s.fullHistorySize}`,
+            `参与上下文条数：${s.contextSize}`,
+            `触发阈值：超过 ${s.triggerMessages} 条`,
+            `保留最近：${s.keepMessages} 条`,
+            `是否已压缩：${s.summarized ? '是' : '否（尚未超过阈值）'}`,
+            `上次压缩是否成功：${s.lastCompactionSucceeded ? '是' : '否（已降级为窗口裁剪）'}`,
+        ];
+        if (s.summary) {
+            lines.push('', '—— 当前摘要 ——', s.summary);
+        }
+        bubble('', `摘要状态 · ${sessionId}`, lines.join('\n'));
+    }
+
     async function resetSession() {
         const sessionId = $('sessionId').value.trim() || 'default';
         const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/reset`, {method: 'POST'});
@@ -512,6 +538,7 @@
 
     $('send').onclick = send;
     $('btnHistory').onclick = showHistory;
+    $('btnSummary').onclick = showSummary;
     $('btnReset').onclick = resetSession;
     $('btnDestroy').onclick = destroySession;
 

@@ -1,5 +1,11 @@
 package com.zheng.fishagent.web.config;
 
+import com.zheng.fishagent.llm.ChatModel;
+import com.zheng.fishagent.llm.ollama.OllamaChatModel;
+import com.zheng.fishagent.memory.ChatMemory;
+import com.zheng.fishagent.memory.FileChatMemory;
+import com.zheng.fishagent.memory.MessageWindowChatMemory;
+import com.zheng.fishagent.memory.SummarizingChatMemory;
 import com.zheng.fishagent.tool.FunctionTool;
 import com.zheng.fishagent.tool.Tool;
 import com.zheng.fishagent.web.agent.AgentFactory;
@@ -15,6 +21,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
+import java.nio.file.Path;
 import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ExecutorService;
@@ -137,15 +144,42 @@ public class AgentConfiguration {
     }
 
     /**
-     * 默认的会话存储：进程内内存实现，重启即丢。
+     * 用于生成摘要的模型。
      * <p>
-     * 想换成基于 SDK {@code FileChatMemory} 的持久化实现，或基于 Redis 的分布式实现，
-     * 提供自己的 {@code SessionStore} Bean 覆盖即可。
+     * 摘要任务对模型能力要求不高，可以是与主对话不同的（通常更轻量的）模型。
+     * 这里暂时复用主模型，需要单独指定时改这一处即可。
+     * <p>
+     * <b>为什么单独建 Bean</b>：{@link SummarizingChatMemory} 要求构造时就拿到 {@code ChatModel}，
+     * 而主对话用的模型是在 {@code AgentFactory.create()} 里按需创建的，两者的生命周期不同。
+     */
+    @Bean
+    public ChatModel summarizeModel(AgentProperties properties) {
+        return OllamaChatModel.builder()
+                .baseUrl(properties.baseUrl())
+                .model(properties.model())
+                .build();
+    }
+
+    /**
+     * 默认的会话存储：底层为 SDK 的 {@link FileChatMemory}，会话按 JSONL 落盘，重启不丢。
+     * <p>
+     * 记忆是<b>并列</b>结构而非嵌套：底层只保存完整原文，运行期在它之上二选一——
+     * 启用摘要时用 {@link SummarizingChatMemory}，否则用 {@link MessageWindowChatMemory}。
+     * 这样摘要读到的始终是完整原文，窗口也不会把「原文」裁掉（见 {@link InMemorySessionStore}）。
+     * <p>
+     * 想换成 Redis 等分布式实现，提供自己的 {@code SessionStore} Bean 覆盖即可。
      */
     @Bean
     @ConditionalOnMissingBean(SessionStore.class)
-    public SessionStore sessionStore(AgentProperties properties) {
-        return new InMemorySessionStore(properties.sessionWindowSize());
+    public SessionStore sessionStore(AgentProperties properties, ChatModel summarizeModel) {
+        Path directory = Path.of(properties.sessionDirectory());
+        return new InMemorySessionStore(
+                id -> FileChatMemory.of(id, directory),
+                properties.sessionWindowSize(),
+                properties.summarizeEnabled(),
+                properties.summarizeTrigger(),
+                properties.summarizeKeep(),
+                summarizeModel);
     }
 
     @Bean

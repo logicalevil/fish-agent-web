@@ -15,7 +15,11 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * @param streaming            是否流式输出
  * @param maxIterations        单次 run 的最大推理轮数
  * @param maxRepeatedToolCalls 同一工具调用允许重复的最大次数，超过判定为死循环
- * @param sessionWindowSize    会话记忆滑动窗口大小（SYSTEM 消息始终保留）
+ * @param sessionWindowSize    关闭摘要时参与上下文的最近消息条数（SYSTEM 消息始终保留）
+ * @param sessionDirectory     会话落盘目录，每个会话一个 JSONL 文件
+ * @param summarizeEnabled     是否启用上下文摘要压缩
+ * @param summarizeTrigger     未摘要消息数超过该值时触发压缩，必须大于 summarizeKeep
+ * @param summarizeKeep        压缩后保留的最近消息条数
  * @param instructions         追加的行为准则，与 SDK 内置 ReAct 说明拼接
  */
 @ConfigurationProperties(prefix = "fish-agent")
@@ -28,8 +32,13 @@ public record AgentProperties(
         int maxIterations,
         int maxRepeatedToolCalls,
         int sessionWindowSize,
+        String sessionDirectory,
+        boolean summarizeEnabled,
+        int summarizeTrigger,
+        int summarizeKeep,
         String instructions) {
 
+    /** 默认启用摘要压缩：这个测试程序的目的就是验证 SDK 能力。 */
     public AgentProperties {
         baseUrl = isBlank(baseUrl) ? "http://localhost:11434" : baseUrl;
         model = isBlank(model) ? "qwen2.5:7b" : model;
@@ -37,9 +46,27 @@ public record AgentProperties(
         maxIterations = maxIterations <= 0 ? 8 : maxIterations;
         maxRepeatedToolCalls = maxRepeatedToolCalls <= 0 ? 3 : maxRepeatedToolCalls;
         sessionWindowSize = sessionWindowSize <= 0 ? 20 : sessionWindowSize;
+        sessionDirectory = isBlank(sessionDirectory) ? ".fishagent/sessions" : sessionDirectory;
+        summarizeTrigger = summarizeTrigger <= 0 ? 20 : summarizeTrigger;
+        summarizeKeep = summarizeKeep <= 0 ? 5 : summarizeKeep;
+        // SDK 侧要求 keep < trigger，否则会「刚压缩完又触发」；
+        // 这里做一次兜底修正，避免配置写反导致启动即失败
+        if (summarizeKeep >= summarizeTrigger) {
+            summarizeKeep = Math.max(1, summarizeTrigger / 4);
+        }
         if (instructions == null) {
             instructions = DEFAULT_INSTRUCTIONS;
         }
+    }
+
+    /**
+     * 摘要是否真正生效。
+     * <p>
+     * 底层是完整落盘的原文（不做裁剪），摘要依据的是它的实际条数，
+     * 因此不存在「窗口太小导致阈值永不触发」的问题。
+     */
+    public boolean summarizationActive() {
+        return summarizeEnabled;
     }
 
     /**

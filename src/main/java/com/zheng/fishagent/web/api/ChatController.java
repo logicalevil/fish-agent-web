@@ -2,12 +2,15 @@ package com.zheng.fishagent.web.api;
 
 import com.zheng.fishagent.agent.AgentListener;
 import com.zheng.fishagent.agent.AgentResult;
+import com.zheng.fishagent.memory.ChatMemory;
+import com.zheng.fishagent.memory.SummarizingChatMemory;
 import com.zheng.fishagent.message.Message;
 import com.zheng.fishagent.message.ToolCall;
 import com.zheng.fishagent.tool.Tool;
 import com.zheng.fishagent.tool.ToolSpec;
 import com.zheng.fishagent.web.agent.AgentFactory;
 import com.zheng.fishagent.web.agent.AgentSessionManager;
+import com.zheng.fishagent.web.agent.InMemorySessionStore;
 import com.zheng.fishagent.web.agent.SessionStore;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -297,6 +300,47 @@ public class ChatController {
         body.put("activeSessions", sessionManager.activeSessionCount());
         body.put("storedSessions", sessionStore.sessionCount());
         body.put("sessionIds", sessionManager.sessionIds());
+        if (sessionStore instanceof InMemorySessionStore store) {
+            body.put("summarizeEnabled", store.summarizeEnabled());
+            body.put("summarizeTrigger", store.summarizeTrigger());
+            body.put("summarizeKeep", store.summarizeKeep());
+        }
+        return body;
+    }
+
+    /**
+     * 观察指定会话的摘要压缩状态——用于确认「压缩确实生效了」。
+     * <p>
+     * 返回三组关键数据：
+     * <ul>
+     *   <li>{@code fullHistorySize}：底层保存的原文条数（压缩不会减少它）；</li>
+     *   <li>{@code contextSize}：实际参与模型上下文的消息条数（被压缩后会明显小于前者）；</li>
+     *   <li>{@code summary}：当前摘要正文，{@code summarized=false} 表示还没触发过压缩。</li>
+     * </ul>
+     */
+    @GetMapping(value = "/sessions/{sessionId}/summary", produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> summary(@PathVariable String sessionId) {
+        String id = normalizeSession(sessionId);
+        ChatMemory memory = sessionStore.memoryFor(id);
+
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("sessionId", id);
+        body.put("fullHistorySize", memory.messages().size());
+
+        if (memory instanceof SummarizingChatMemory summarizing) {
+            body.put("summarizing", true);
+            body.put("triggerMessages", summarizing.triggerMessages());
+            body.put("keepMessages", summarizing.keepMessages());
+            body.put("summarized", summarizing.summary() != null);
+            body.put("summary", summarizing.summary());
+            body.put("lastCompactionSucceeded", summarizing.lastCompactionSucceeded());
+            body.put("fullHistorySize", summarizing.fullHistory().size());
+            body.put("contextSize", summarizing.messages().size());
+        } else {
+            body.put("summarizing", false);
+            body.put("contextSize", memory.messages().size());
+            body.put("note", "当前会话记忆未启用摘要压缩");
+        }
         return body;
     }
 
