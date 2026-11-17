@@ -10,10 +10,14 @@ import com.zheng.fishagent.memory.ChatMemory;
  * 把「记忆从哪来」抽出来之后，替换后端就只需新增一个实现，业务代码不用动：
  *
  * <ul>
- *   <li>{@link InMemorySessionStore} —— 默认实现，进程内 {@code ConcurrentHashMap}，重启即丢。</li>
- *   <li>后续想持久化，可实现一个基于 SDK {@code FileChatMemory} 的 store；
- *       想横向扩展，可实现一个基于 Redis 的 store。</li>
+ *   <li>{@link InMemorySessionStore} —— 默认实现，底层为 SDK {@code FileChatMemory}，
+ *       按 JSONL 落盘；进程内只维护「会话标识 → 记忆」的映射。</li>
+ *   <li>想横向扩展，可实现一个基于 Redis 的 store；想换存储介质而不换结构，
+ *       只需换掉 {@code InMemorySessionStore} 的底层工厂。</li>
  * </ul>
+ *
+ * <b>记忆结构约定</b>：底层只保留完整原文，裁剪/摘要作为并列策略施加在其上；
+ * SHALL NOT 把窗口装饰器嵌套在摘要装饰器里层（理由见 {@code SummarizingChatMemory} 类注释）。
  *
  * 实现类需要保证：同一 sessionId 并发调用返回的记忆对象是同一个、且过程线程安全。
  */
